@@ -513,6 +513,19 @@
   </div>
 </div>
 
+<!-- INFORME MODAL -->
+<div class="pin-modal" id="report-modal">
+  <div class="pin-box">
+    <h3 id="report-title">Informe del día</h3>
+    <p id="report-status">Preparando el informe...</p>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <button class="primary" id="report-download" disabled>Descargar PDF</button>
+      <button class="primary" id="report-share" disabled style="background:#1A1712;color:#F7E2AE;">Compartir o enviar</button>
+      <button class="ghost" id="report-close">Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ---------------------------------------------------------------
 // LOGO (incrustado en base64 para que el archivo sea autónomo)
@@ -1291,13 +1304,103 @@ function escapeHtml(str){
 // ---------------------------------------------------------------
 // PDF EXPORT
 // ---------------------------------------------------------------
-document.getElementById("download-pdf-btn").addEventListener("click", () => {
+let reportBlob = null, reportName = "", reportDateLabel = "";
+
+function reportStatus(msg, isError){
+  const el = document.getElementById("report-status");
+  el.textContent = msg;
+  el.style.color = isError ? "#8F3D20" : "";
+}
+
+document.getElementById("download-pdf-btn").addEventListener("click", async () => {
   if(!currentStats || !currentDate){
     alert("No hay datos que exportar para este día.");
     return;
   }
-  buildPdf(currentDate, currentResponses, currentStats);
+  const dlBtn = document.getElementById("report-download");
+  const shBtn = document.getElementById("report-share");
+  dlBtn.disabled = true; shBtn.disabled = true;
+  reportBlob = null;
+  reportDateLabel = formatDateEs(currentDate);
+  document.getElementById("report-title").textContent = "Informe del " + reportDateLabel;
+  reportStatus("Preparando el informe... (unos segundos)");
+  document.getElementById("report-modal").style.display = "flex";
+  await new Promise(r => setTimeout(r, 60));   // deja que se pinte el aviso
+  try{
+    try{ await loadAdminLibs(); }catch(e){}
+    if(!window.jspdf) throw new Error("jsPDF no cargado");
+    const doc = await buildPdf(currentDate, currentResponses, currentStats);
+    reportBlob = doc.output("blob");
+    reportName = "Resumen_satisfaccion_" + currentDate + ".pdf";
+    reportStatus("Informe listo. ¿Qué quieres hacer?");
+    dlBtn.disabled = false; shBtn.disabled = false;
+  }catch(err){
+    console.error(err);
+    reportStatus("No se pudo preparar el informe. Comprueba la conexión, recarga la página e inténtalo de nuevo.", true);
+  }
 });
+
+document.getElementById("report-close").addEventListener("click", () => {
+  document.getElementById("report-modal").style.display = "none";
+});
+
+function descargarBlob(blob, name){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+document.getElementById("report-download").addEventListener("click", () => {
+  if(!reportBlob) return;
+  descargarBlob(reportBlob, reportName);
+  reportStatus("Descargado. Búscalo en la carpeta Descargas de tu dispositivo.");
+});
+
+document.getElementById("report-share").addEventListener("click", async () => {
+  if(!reportBlob) return;
+  const file = new File([reportBlob], reportName, {type:"application/pdf"});
+  const titulo = "Resumen de satisfacción · " + reportDateLabel;
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    try{
+      await navigator.share({files:[file], title: titulo, text: titulo + " — Restaurante Escuela San Roque"});
+      reportStatus("Informe enviado.");
+    }catch(err){
+      if(err && err.name !== "AbortError") reportStatus("No se pudo compartir. Prueba con Descargar PDF.", true);
+    }
+  }else{
+    // Ordenador / navegador sin "compartir": descarga y abre el correo
+    descargarBlob(reportBlob, reportName);
+    reportStatus("Se ha descargado el PDF y se abre tu correo. Adjunta el archivo descargado al mensaje.");
+    setTimeout(() => {
+      window.location.href = "mailto:?subject=" + encodeURIComponent(titulo) +
+        "&body=" + encodeURIComponent("Adjunto el resumen de satisfacción del " + reportDateLabel + " del Restaurante Escuela San Roque.");
+    }, 700);
+  }
+});
+
+// Gráficos y logo se meten en el PDF como JPEG (mucho más rápido que PNG en el móvil)
+function canvasToJpeg(src, maxW){
+  const w = Math.min(src.width, maxW), h = Math.round(src.height * w / src.width);
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0,0,w,h); x.drawImage(src,0,0,w,h);
+  return c.toDataURL("image/jpeg", 0.9);
+}
+let logoJpegCache = null;
+function logoJpeg(){
+  if(logoJpegCache) return Promise.resolve(logoJpegCache);
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas"); c.width = 240; c.height = 240;
+      const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0,0,240,240); x.drawImage(img,0,0,240,240);
+      logoJpegCache = c.toDataURL("image/jpeg", 0.92); res(logoJpegCache);
+    };
+    img.onerror = () => res(null);
+    img.src = "data:image/png;base64," + LOGO_B64;
+  });
+}
 
 function addSectionChart(doc, y, marginX, contentWidth, title, chartKey, aspectRatio, extraLine){
   const imgHeight = contentWidth * aspectRatio;
@@ -1312,8 +1415,8 @@ function addSectionChart(doc, y, marginX, contentWidth, title, chartKey, aspectR
   y += 5;
   try{
     if(chartInstances[chartKey]){
-      const img = chartInstances[chartKey].toBase64Image();
-      doc.addImage(img, "PNG", marginX, y, contentWidth, imgHeight);
+      const img = canvasToJpeg(chartInstances[chartKey].canvas, 1000);
+      doc.addImage(img, "JPEG", marginX, y, contentWidth, imgHeight);
       y += imgHeight + 4;
     }
   }catch(e){ /* si falla el gráfico, seguimos sin él */ }
@@ -1329,7 +1432,7 @@ function addSectionChart(doc, y, marginX, contentWidth, title, chartKey, aspectR
   return y;
 }
 
-function buildPdf(dateISO, responses, stats){
+async function buildPdf(dateISO, responses, stats){
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({unit:"mm", format:"a4"});
   const marginX = 16;
@@ -1338,7 +1441,8 @@ function buildPdf(dateISO, responses, stats){
   let y = 16;
 
   try{
-    doc.addImage("data:image/png;base64," + LOGO_B64, "PNG", marginX, y, 18, 18);
+    const lg = await logoJpeg();
+    if(lg) doc.addImage(lg, "JPEG", marginX, y, 18, 18);
   }catch(e){ /* si falla la imagen, seguimos sin logo */ }
 
   doc.setFont("helvetica","bold");
@@ -1414,7 +1518,7 @@ function buildPdf(dateISO, responses, stats){
     doc.text(`Escuela de Hostelería San Roque · página ${i} de ${pageCount}`, marginX, 292);
   }
 
-  doc.save(`Resumen_satisfaccion_${dateISO}.pdf`);
+  return doc;
 }
 </script>
 
