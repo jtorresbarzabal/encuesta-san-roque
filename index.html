@@ -14,10 +14,6 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,340;9..144,500;9..144,650&family=Karla:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-datalabels/2.2.0/chartjs-plugin-datalabels.min.js"></script>
 <style>
   :root{
     --cream:#F6F1E3;
@@ -447,11 +443,13 @@
     </div>
 
     <div class="card" id="service-date-card">
-      <h2 class="section-title">Fecha del servicio en curso</h2>
-      <p class="legend">Las encuestas que se envíen desde ahora se guardarán con esta fecha. Cámbiala al abrir cada servicio si hace falta.</p>
-      <input type="date" id="service-date-input" class="date-select" style="margin-bottom:10px;">
-      <button type="button" class="ghost" id="save-service-date-btn">Guardar fecha de servicio</button>
-      <div class="service-date-status" id="service-date-status"></div>
+      <h2 class="section-title">Días de apertura</h2>
+      <p class="legend">Marca los días en que abre el restaurante y pulsa guardar. Las encuestas se guardarán solas con la fecha del servicio, sin que tengas que cambiarla cada vez.</p>
+      <div id="open-days" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;"></div>
+      <button type="button" class="ghost" id="save-open-days-btn">Guardar días de apertura</button>
+      <div class="service-date-status" id="open-days-status"></div>
+
+      <div class="service-date-status" id="service-date-legend" style="margin-top:14px;"></div>
     </div>
 
     <h2 class="section-title" style="margin:4px 0 10px;">Ver informe del día</h2>
@@ -526,9 +524,30 @@ async function apiPost(body){
   return resp.json();
 }
 
-if(window.Chart && window.ChartDataLabels){
-  Chart.register(ChartDataLabels);
+// Las librerías de gráficos y PDF solo hacen falta en el panel del equipo,
+// así que se cargan en segundo plano DESPUÉS de mostrar la encuesta.
+function loadScript(src){
+  return new Promise((res, rej) => {
+    const el = document.createElement("script");
+    el.src = src; el.onload = res; el.onerror = () => rej(new Error("No se pudo cargar " + src));
+    document.head.appendChild(el);
+  });
 }
+const CDN = "https://cdnjs.cloudflare.com/ajax/libs/";
+let libsPromise = null;
+function loadAdminLibs(){
+  if(!libsPromise){
+    libsPromise = Promise.all([
+      loadScript(CDN + "Chart.js/4.4.1/chart.umd.min.js")
+        .then(() => loadScript(CDN + "chartjs-plugin-datalabels/2.2.0/chartjs-plugin-datalabels.min.js"))
+        .then(() => { if(window.Chart && window.ChartDataLabels) Chart.register(ChartDataLabels); }),
+      loadScript(CDN + "jspdf/2.5.1/jspdf.umd.min.js")
+        .then(() => loadScript(CDN + "jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"))
+    ]).catch(err => { libsPromise = null; throw err; });
+  }
+  return libsPromise;
+}
+window.addEventListener("load", () => setTimeout(() => { loadAdminLibs().catch(()=>{}); }, 1500));
 
 const PLATOS_ITEMS = [
   ["visual", "Aspecto visual de los platos"],
@@ -790,38 +809,87 @@ function closeAdmin(){
   document.getElementById("screen-survey").style.display = "block";
 }
 
-async function getServiceDate(){
-  try{
-    const d = await apiGet("getServiceDate");
-    if(d) return d;
-  }catch(err){ /* si falla, usamos la fecha de hoy */ }
-  return todayISO();
+// Fecha de servicio.
+// En Google se guarda UNA sola cosa: o bien "auto:2,4" (días de apertura,
+// 0=domingo ... 6=sábado) o bien una fecha fija "AAAA-MM-DD" puesta a mano.
+const DIAS_SEMANA = [["Lun",1],["Mar",2],["Mié",3],["Jue",4],["Vie",5],["Sáb",6],["Dom",0]];
+
+function localISO(d){
+  const p = n => String(n).padStart(2,"0");
+  return d.getFullYear() + "-" + p(d.getMonth()+1) + "-" + p(d.getDate());
 }
+function parseServiceConfig(raw){
+  raw = (raw === null || raw === undefined) ? "" : String(raw).trim();
+  if(raw.startsWith("auto:")){
+    const days = raw.slice(5).split(",").filter(x => x !== "").map(Number).filter(n => n >= 0 && n <= 6);
+    if(days.length) return {mode:"auto", days};
+  }
+  if(/^\d{4}-\d{2}-\d{2}$/.test(raw)) return {mode:"manual", date:raw};
+  return {mode:"none"};
+}
+// Si hoy es día de apertura, hoy. Si no, el último día de apertura anterior
+// (así una respuesta enviada después de medianoche sigue contando para ese servicio).
+function resolveAuto(days){
+  const d = new Date();
+  for(let i = 0; i < 7; i++){
+    if(days.includes(d.getDay())) return localISO(d);
+    d.setDate(d.getDate() - 1);
+  }
+  return localISO(new Date());
+}
+function dateFromConfig(cfg){
+  if(cfg.mode === "auto") return resolveAuto(cfg.days);
+  if(cfg.mode === "manual") return cfg.date;
+  return localISO(new Date());
+}
+async function getServiceConfig(){
+  try{ return parseServiceConfig(await apiGet("getServiceDate")); }
+  catch(err){ return {mode:"none"}; }
+}
+async function getServiceDate(){
+  return dateFromConfig(await getServiceConfig());
+}
+function fmtFecha(iso){ const [y,m,d] = iso.split("-"); return d + "/" + m + "/" + y; }
 
 async function initServiceDateControl(){
-  const input = document.getElementById("service-date-input");
-  const status = document.getElementById("service-date-status");
-  status.textContent = "";
-  input.value = await getServiceDate();
+  const dstatus = document.getElementById("open-days-status");
+  const legend = document.getElementById("service-date-legend");
+  dstatus.textContent = "";
+  const cfg = await getServiceConfig();
+  const box = document.getElementById("open-days");
+  const marcados = cfg.mode === "auto" ? cfg.days : [];
+  box.innerHTML = DIAS_SEMANA.map(([nombre, n]) =>
+    '<label style="display:flex;align-items:center;gap:6px;padding:8px 12px;border:1.5px solid var(--line);border-radius:999px;background:#fff;font-weight:600;">' +
+    '<input type="checkbox" value="' + n + '"' + (marcados.includes(n) ? " checked" : "") + '> ' + nombre + '</label>'
+  ).join("");
+  const fecha = dateFromConfig(cfg);
+  if(cfg.mode === "auto"){
+    legend.textContent = "Modo automático: ahora mismo las encuestas se guardan como servicio del " + fmtFecha(fecha) + ".";
+  }else if(cfg.mode === "manual"){
+    legend.textContent = "Ahora mismo hay una fecha fija (" + fmtFecha(fecha) + "). Marca los días de apertura y guarda para que sea automático.";
+  }else{
+    legend.textContent = "Aún no hay días de apertura guardados: se usa la fecha de hoy (" + fmtFecha(fecha) + "). Marca los días y guarda.";
+  }
 }
 
-document.getElementById("save-service-date-btn").addEventListener("click", async () => {
-  const input = document.getElementById("service-date-input");
-  const status = document.getElementById("service-date-status");
-  const val = input.value;
-  if(!val){
-    status.textContent = "Elige una fecha válida.";
-    status.style.color = "#8F3D20";
+document.getElementById("save-open-days-btn").addEventListener("click", async () => {
+  const dstatus = document.getElementById("open-days-status");
+  const dias = [...document.querySelectorAll("#open-days input:checked")].map(i => i.value);
+  if(!dias.length){
+    dstatus.textContent = "Marca al menos un día.";
+    dstatus.style.color = "#8F3D20";
     return;
   }
   try{
-    await apiPost({action: "setServiceDate", date: val});
-    status.textContent = "Fecha de servicio actualizada.";
-    status.style.color = "var(--orange-deep)";
-    await loadDateOptions(val);
+    await apiPost({action: "setServiceDate", date: "auto:" + dias.join(",")});
+    cachedServiceDate = null;
+    await initServiceDateControl();
+    document.getElementById("open-days-status").textContent = "Días de apertura guardados.";
+    document.getElementById("open-days-status").style.color = "var(--orange-deep)";
+    await loadDateOptions(await getServiceDate());
   }catch(err){
-    status.textContent = "No se pudo guardar. Inténtalo de nuevo.";
-    status.style.color = "#8F3D20";
+    dstatus.textContent = "No se pudo guardar. Inténtalo de nuevo.";
+    dstatus.style.color = "#8F3D20";
   }
 });
 
@@ -829,6 +897,7 @@ async function openAdmin(){
   document.getElementById("screen-survey").style.display = "none";
   document.getElementById("screen-thanks").style.display = "none";
   document.getElementById("screen-admin").style.display = "block";
+  try{ await loadAdminLibs(); }catch(e){}
   await initServiceDateControl();
   await loadDateOptions();
 }
@@ -837,7 +906,7 @@ async function openAdmin(){
 // DATA LOADING
 // ---------------------------------------------------------------
 function todayISO(){
-  return new Date().toISOString().slice(0,10);
+  return localISO(new Date());
 }
 
 async function getAllDates(){
