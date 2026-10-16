@@ -682,8 +682,8 @@ document.getElementById("survey-form").addEventListener("submit", async (e) => {
   btn.disabled = true;
   btn.textContent = "Enviando...";
 
-  const now = new Date();
-  const dateISO = await getServiceDate();
+  // Fecha de servicio: se pidió al abrir la página; si es muy antigua, se refresca
+  const dateISO = await getServiceDateCached();
   const record = {
     dateISO,
     platos: {...state.platos},
@@ -693,16 +693,57 @@ document.getElementById("survey-form").addEventListener("submit", async (e) => {
     observaciones: document.getElementById("observaciones").value.trim()
   };
 
-  try{
-    await apiPost({action: "saveResponse", ...record});
-    document.getElementById("screen-survey").style.display = "none";
-    document.getElementById("screen-thanks").style.display = "block";
-  }catch(err){
-    statusEl.textContent = "No se pudo enviar. Comprueba tu conexión e inténtalo de nuevo.";
-    btn.disabled = false;
-    btn.textContent = "Enviar valoración";
-  }
+  // Se guarda primero en el móvil (por seguridad) y se enseña el "Gracias"
+  // al instante; el envío real se hace por detrás y se reintenta si falla.
+  queueResponse(record);
+  document.getElementById("screen-survey").style.display = "none";
+  document.getElementById("screen-thanks").style.display = "block";
+  flushQueue();
 });
+
+// ---------- Envío en segundo plano con reintentos ----------
+const QUEUE_KEY = "encuesta_pendientes";
+function readQueue(){
+  try{ return JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); }catch(e){ return window.__memQueue || []; }
+}
+function writeQueue(q){
+  window.__memQueue = q;
+  try{ localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); }catch(e){}
+}
+function queueResponse(record){
+  const q = readQueue();
+  q.push({id: Date.now() + "-" + Math.random().toString(36).slice(2), record});
+  writeQueue(q);
+}
+let flushing = false;
+async function flushQueue(){
+  if(flushing) return;
+  flushing = true;
+  try{
+    let q = readQueue();
+    while(q.length){
+      const item = q[0];
+      try{
+        await apiPost({action: "saveResponse", ...item.record});
+      }catch(err){ break; }   // sin conexión: se reintentará más tarde
+      q = readQueue().filter(x => x.id !== item.id);
+      writeQueue(q);
+    }
+  } finally { flushing = false; }
+}
+window.addEventListener("online", flushQueue);
+setInterval(flushQueue, 20000);
+
+// Fecha de servicio precargada al abrir la página (evita una espera al enviar)
+let cachedServiceDate = null, cachedServiceDateAt = 0;
+async function getServiceDateCached(){
+  if(cachedServiceDate && Date.now() - cachedServiceDateAt < 5*60*1000) return cachedServiceDate;
+  const d = await getServiceDate();
+  cachedServiceDate = d; cachedServiceDateAt = Date.now();
+  return d;
+}
+getServiceDateCached();   // se lanza ya, en segundo plano
+flushQueue();             // por si quedó algo pendiente de otra vez
 
 function resetToSurvey(){
   // Reset state
