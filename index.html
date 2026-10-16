@@ -265,6 +265,32 @@
     display:block;
     margin-top:6px;
   }
+
+  #cal-details summary{
+    cursor:pointer; list-style:none; padding:13px 16px; border:1.5px solid #E6D8B3; border-radius:14px;
+    background:#fff; font-weight:700; color:#1A1712; display:flex; justify-content:space-between; align-items:center;
+  }
+  #cal-details summary::-webkit-details-marker{display:none;}
+  #cal-details summary::after{content:"▾"; color:#8C6234; font-size:18px; transition:transform .2s;}
+  #cal-details[open] summary::after{transform:rotate(180deg);}
+  .cal-quick{display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:6px 0 14px; font-size:14px; color:#6E6355;}
+  .cal-quick button{
+    border:1.5px solid #E6D8B3; background:#fff; border-radius:999px; padding:7px 13px;
+    font:inherit; font-weight:700; color:#1A1712; cursor:pointer;
+  }
+  .cal-quick #cal-quick-btns{display:flex; flex-wrap:wrap; gap:6px;}
+  .cal-month{margin:0 0 18px;}
+  .cal-month h3{font-family:"Fraunces",serif; font-size:18px; margin:0 0 8px; color:#8C6234; text-transform:capitalize;}
+  .cal-grid{display:grid; grid-template-columns:repeat(7,1fr); gap:5px;}
+  .cal-dow{font-size:12px; font-weight:700; color:#6E6355; text-align:center; padding-bottom:2px;}
+  .cal-day{
+    aspect-ratio:1/1; border:1.5px solid #E6D8B3; background:#fff; border-radius:10px; font:inherit;
+    font-size:15px; font-weight:600; color:#1A1712; cursor:pointer; padding:0;
+  }
+  .cal-day.empty{border:none; background:none; cursor:default;}
+  .cal-day.sel{background:#C9973E; border-color:#8C6234; color:#1A1712; font-weight:800;}
+  .cal-day.today{outline:2px solid #1A1712; outline-offset:1px;}
+  .cal-count{margin:6px 0 12px; font-weight:700; color:#1A1712;}
   .service-date-status{
     font-size:13px;
     text-align:left;
@@ -443,13 +469,20 @@
     </div>
 
     <div class="card" id="service-date-card">
-      <h2 class="section-title">Días de apertura</h2>
-      <p class="legend">Marca los días en que abre el restaurante y pulsa guardar. Las encuestas se guardarán solas con la fecha del servicio, sin que tengas que cambiarla cada vez.</p>
-      <div id="open-days" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;"></div>
-      <button type="button" class="ghost" id="save-open-days-btn">Guardar días de apertura</button>
-      <div class="service-date-status" id="open-days-status"></div>
-
-      <div class="service-date-status" id="service-date-legend" style="margin-top:14px;"></div>
+      <h2 class="section-title">Fecha del servicio</h2>
+      <div class="service-date-status" id="service-date-legend" style="margin:0 0 12px;"></div>
+      <details id="cal-details">
+        <summary id="cal-summary">Calendario de apertura · curso 26-27</summary>
+        <p class="legend" style="margin:10px 0;">Toca los días en que abre el restaurante (se ponen en dorado). Toca otra vez para quitarlo. Al terminar, pulsa <b>Guardar calendario</b>.</p>
+        <div class="cal-quick">
+          <span>Atajo, marcar todos los:</span>
+          <div id="cal-quick-btns"></div>
+        </div>
+        <div id="cal-months"></div>
+        <div class="cal-count" id="cal-count"></div>
+        <button type="button" class="ghost" id="save-cal-btn">Guardar calendario</button>
+        <div class="service-date-status" id="cal-status"></div>
+      </details>
     </div>
 
     <h2 class="section-title" style="margin:4px 0 10px;">Ver informe del día</h2>
@@ -810,9 +843,12 @@ function closeAdmin(){
 }
 
 // Fecha de servicio.
-// En Google se guarda UNA sola cosa: o bien "auto:2,4" (días de apertura,
-// 0=domingo ... 6=sábado) o bien una fecha fija "AAAA-MM-DD" puesta a mano.
-const DIAS_SEMANA = [["Lun",1],["Mar",2],["Mié",3],["Jue",4],["Vie",5],["Sáb",6],["Dom",0]];
+// En Google se guarda UNA sola cosa: "cal:2026-10-20,2026-10-22,..." =
+// la lista de días de apertura marcados en el calendario.
+const CURSO_MESES = [[2026,9],[2026,10],[2026,11],[2027,0],[2027,1],[2027,2]]; // oct 2026 - mar 2027
+const NOMBRES_MES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+const DOW_CORTO = ["L","M","X","J","V","S","D"];
+let calSel = new Set();
 
 function localISO(d){
   const p = n => String(n).padStart(2,"0");
@@ -820,27 +856,20 @@ function localISO(d){
 }
 function parseServiceConfig(raw){
   raw = (raw === null || raw === undefined) ? "" : String(raw).trim();
-  if(raw.startsWith("auto:")){
-    const days = raw.slice(5).split(",").filter(x => x !== "").map(Number).filter(n => n >= 0 && n <= 6);
-    if(days.length) return {mode:"auto", days};
+  if(raw.startsWith("cal:")){
+    const dates = raw.slice(4).split(",").filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+    if(dates.length) return {mode:"cal", dates};
   }
-  if(/^\d{4}-\d{2}-\d{2}$/.test(raw)) return {mode:"manual", date:raw};
   return {mode:"none"};
 }
-// Si hoy es día de apertura, hoy. Si no, el último día de apertura anterior
+// Si hoy es día de servicio, hoy. Si no, el último día de servicio anterior
 // (así una respuesta enviada después de medianoche sigue contando para ese servicio).
-function resolveAuto(days){
-  const d = new Date();
-  for(let i = 0; i < 7; i++){
-    if(days.includes(d.getDay())) return localISO(d);
-    d.setDate(d.getDate() - 1);
-  }
-  return localISO(new Date());
-}
 function dateFromConfig(cfg){
-  if(cfg.mode === "auto") return resolveAuto(cfg.days);
-  if(cfg.mode === "manual") return cfg.date;
-  return localISO(new Date());
+  const hoy = localISO(new Date());
+  if(cfg.mode !== "cal") return hoy;
+  let mejor = null;
+  for(const d of cfg.dates){ if(d <= hoy) mejor = d; else break; }
+  return mejor || hoy;
 }
 async function getServiceConfig(){
   try{ return parseServiceConfig(await apiGet("getServiceDate")); }
@@ -851,45 +880,90 @@ async function getServiceDate(){
 }
 function fmtFecha(iso){ const [y,m,d] = iso.split("-"); return d + "/" + m + "/" + y; }
 
+function renderCalendar(){
+  const hoy = localISO(new Date());
+  const cont = document.getElementById("cal-months");
+  cont.innerHTML = CURSO_MESES.map(([y,m]) => {
+    const offset = (new Date(y,m,1).getDay() + 6) % 7;
+    const dias = new Date(y,m+1,0).getDate();
+    let celdas = DOW_CORTO.map(x => '<div class="cal-dow">' + x + '</div>').join("");
+    for(let i = 0; i < offset; i++) celdas += '<div class="cal-day empty"></div>';
+    for(let d = 1; d <= dias; d++){
+      const iso = y + "-" + String(m+1).padStart(2,"0") + "-" + String(d).padStart(2,"0");
+      celdas += '<button type="button" class="cal-day' + (calSel.has(iso) ? " sel" : "") + (iso === hoy ? " today" : "") + '" data-d="' + iso + '">' + d + '</button>';
+    }
+    return '<div class="cal-month"><h3>' + NOMBRES_MES[m] + ' ' + y + '</h3><div class="cal-grid">' + celdas + '</div></div>';
+  }).join("");
+  document.getElementById("cal-count").textContent = calSel.size === 1 ? "1 día de servicio marcado" : calSel.size + " días de servicio marcados";
+}
+
+function diasDelCursoConSemana(dow){
+  const out = [];
+  CURSO_MESES.forEach(([y,m]) => {
+    const n = new Date(y,m+1,0).getDate();
+    for(let d = 1; d <= n; d++){
+      if(new Date(y,m,d).getDay() === dow) out.push(y + "-" + String(m+1).padStart(2,"0") + "-" + String(d).padStart(2,"0"));
+    }
+  });
+  return out;
+}
+
+document.getElementById("cal-months").addEventListener("click", e => {
+  const b = e.target.closest(".cal-day[data-d]");
+  if(!b) return;
+  const d = b.dataset.d;
+  if(calSel.has(d)) calSel.delete(d); else calSel.add(d);
+  b.classList.toggle("sel", calSel.has(d));
+  const n = calSel.size;
+  document.getElementById("cal-count").textContent = n === 1 ? "1 día de servicio marcado" : n + " días de servicio marcados";
+});
+
+document.getElementById("cal-quick-btns").innerHTML = [["Lun",1],["Mar",2],["Mié",3],["Jue",4],["Vie",5],["Sáb",6],["Dom",0]]
+  .map(([n,w]) => '<button type="button" data-w="' + w + '">' + n + '</button>').join("");
+document.getElementById("cal-quick-btns").addEventListener("click", e => {
+  const b = e.target.closest("button[data-w]");
+  if(!b) return;
+  const dias = diasDelCursoConSemana(Number(b.dataset.w));
+  const todosMarcados = dias.every(d => calSel.has(d));
+  dias.forEach(d => todosMarcados ? calSel.delete(d) : calSel.add(d));
+  renderCalendar();
+});
+
 async function initServiceDateControl(){
-  const dstatus = document.getElementById("open-days-status");
   const legend = document.getElementById("service-date-legend");
-  dstatus.textContent = "";
+  document.getElementById("cal-status").textContent = "";
   const cfg = await getServiceConfig();
-  const box = document.getElementById("open-days");
-  const marcados = cfg.mode === "auto" ? cfg.days : [];
-  box.innerHTML = DIAS_SEMANA.map(([nombre, n]) =>
-    '<label style="display:flex;align-items:center;gap:6px;padding:8px 12px;border:1.5px solid var(--line);border-radius:999px;background:#fff;font-weight:600;">' +
-    '<input type="checkbox" value="' + n + '"' + (marcados.includes(n) ? " checked" : "") + '> ' + nombre + '</label>'
-  ).join("");
+  calSel = new Set(cfg.mode === "cal" ? cfg.dates : []);
+  renderCalendar();
   const fecha = dateFromConfig(cfg);
-  if(cfg.mode === "auto"){
-    legend.textContent = "Modo automático: ahora mismo las encuestas se guardan como servicio del " + fmtFecha(fecha) + ".";
-  }else if(cfg.mode === "manual"){
-    legend.textContent = "Ahora mismo hay una fecha fija (" + fmtFecha(fecha) + "). Marca los días de apertura y guarda para que sea automático.";
+  if(cfg.mode === "cal"){
+    legend.textContent = "Ahora mismo las encuestas se guardan como servicio del " + fmtFecha(fecha) + ".";
+    document.getElementById("cal-summary").textContent = "Calendario de apertura · " + cfg.dates.length + " días marcados";
   }else{
-    legend.textContent = "Aún no hay días de apertura guardados: se usa la fecha de hoy (" + fmtFecha(fecha) + "). Marca los días y guarda.";
+    legend.textContent = "Aún no hay calendario guardado: se usa la fecha de hoy (" + fmtFecha(fecha) + "). Abre el calendario y marca los días de servicio.";
+    document.getElementById("cal-summary").textContent = "Calendario de apertura · curso 26-27";
+    document.getElementById("cal-details").open = true;
   }
 }
 
-document.getElementById("save-open-days-btn").addEventListener("click", async () => {
-  const dstatus = document.getElementById("open-days-status");
-  const dias = [...document.querySelectorAll("#open-days input:checked")].map(i => i.value);
-  if(!dias.length){
-    dstatus.textContent = "Marca al menos un día.";
-    dstatus.style.color = "#8F3D20";
+document.getElementById("save-cal-btn").addEventListener("click", async () => {
+  const st = document.getElementById("cal-status");
+  if(!calSel.size){
+    st.textContent = "Marca al menos un día.";
+    st.style.color = "#8F3D20";
     return;
   }
+  const lista = [...calSel].sort();
   try{
-    await apiPost({action: "setServiceDate", date: "auto:" + dias.join(",")});
+    await apiPost({action: "setServiceDate", date: "cal:" + lista.join(",")});
     cachedServiceDate = null;
     await initServiceDateControl();
-    document.getElementById("open-days-status").textContent = "Días de apertura guardados.";
-    document.getElementById("open-days-status").style.color = "var(--orange-deep)";
+    st.textContent = "Calendario guardado.";
+    st.style.color = "var(--orange-deep)";
     await loadDateOptions(await getServiceDate());
   }catch(err){
-    dstatus.textContent = "No se pudo guardar. Inténtalo de nuevo.";
-    dstatus.style.color = "#8F3D20";
+    st.textContent = "No se pudo guardar. Inténtalo de nuevo.";
+    st.style.color = "#8F3D20";
   }
 });
 
